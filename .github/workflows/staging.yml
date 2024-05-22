@@ -1,0 +1,80 @@
+name: build staging package
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+env:
+    IMAGE_NAME: ublue-update
+    IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-staging:
+    name: Build and push rpm package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      # Checkout GitHub repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate tags
+        id: generate-tags
+        shell: bash
+        run: |
+          # Generate a timestamp for creating an image version history
+          TIMESTAMP="$(date +%Y%m%d%H%M)"
+          MAJOR_VERSION="${{ matrix.major_version }}"
+          COMMIT_TAGS=()
+          BUILD_TAGS=()
+          SHA_SHORT="${GITHUB_SHA::7}"
+          BUILD_TAGS=("staging" "staging-${TIMESTAMP}" "staging-${TIMESTAMP}-${SHA_SHORT}")
+          BUILD_TAGS+=("latest")
+
+          alias_tags=("${BUILD_TAGS[@]}")
+          echo "Generated the following build tags: "
+          for TAG in "${BUILD_TAGS[@]}"; do
+              echo "${TAG}"
+          done
+          echo "alias_tags=${alias_tags[*]}" >> $GITHUB_OUTPUT
+          echo "release_name=staging-${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      # Build image using Buildah action
+      - name: Build package using containerized build environment
+        id: build_image
+        uses: redhat-actions/buildah-build@v2
+        with:
+          containerfiles: |
+            ./Containerfile.builder
+          image: ${{ env.IMAGE_NAME }}
+          tags: |
+            ${{ steps.generate-tags.outputs.alias_tags }}
+          oci: true
+          extra-args: |
+            -v ${{ github.workspace }}:/app
+            --target rpm
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create \
+              ${{ steps.generate-tags.outputs.release_name }} \
+              --latest \
+              --prerelease \
+              --repo ${{ github.repository_owner }}/${{ github.event.repository.name }} \
+              --target ${{ github.sha }}
+
+      - name: Upload RPM packages to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          find output/ -type f -name '*.rpm' -print0 | \
+            xargs -0 -tI{} gh release upload \
+              ${{ steps.generate-tags.outputs.release_name }} \
+              {} \
+              --repo ${{ github.repository_owner }}/${{ github.event.repository.name }} \
+              --clobber
